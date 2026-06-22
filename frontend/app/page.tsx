@@ -13,12 +13,22 @@ export default function Home() {
         </p>
       </div>
       <div className="flex flex-wrap items-center justify-center gap-3">
-        <Button render={<Link href="/signup">Get started</Link>} />
         <Button
+          nativeButton={false}
+          render={<Link href="/signup">Get started</Link>}
+        />
+        <Button
+          nativeButton={false}
           variant="outline"
           render={<Link href="/login">Log in</Link>}
         />
         <Button
+          nativeButton={false}
+          variant="ghost"
+          render={<Link href="/techniques">Browse techniques</Link>}
+        />
+        <Button
+          nativeButton={false}
           variant="ghost"
           render={<Link href="/profile">My profile</Link>}
         />

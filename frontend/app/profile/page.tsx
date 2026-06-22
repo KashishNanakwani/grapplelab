@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { signout } from "@/app/auth/actions";
@@ -81,6 +82,12 @@ export default async function ProfilePage() {
               />
             </div>
           )}
+
+          <Button
+            nativeButton={false}
+            className="w-full"
+            render={<Link href="/techniques">Browse techniques</Link>}
+          />
 
           <form action={signout}>
             <Button type="submit" variant="outline" className="w-full">
