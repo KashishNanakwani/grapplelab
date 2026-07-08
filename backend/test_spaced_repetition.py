@@ -4,7 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from spaced_repetition import MIN_EASE_FACTOR, review
+from spaced_repetition import (
+    MIN_EASE_FACTOR,
+    learning_status,
+    memory_score,
+    review,
+)
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -59,3 +64,28 @@ def test_invalid_quality_raises():
     """Quality outside 0..5 is a programming error, not a lapse."""
     with pytest.raises(ValueError):
         review(ease_factor=2.5, interval_days=0, repetitions=0, quality=6, now=NOW)
+
+
+def test_memory_score_new_technique_is_low():
+    """A brand-new / just-lapsed technique scores near the bottom."""
+    assert memory_score(ease_factor=2.5, repetitions=0, interval_days=1) < 20
+
+
+def test_memory_score_mastered_technique_is_high():
+    """A long-interval, high-ease, well-repeated technique approaches 100."""
+    score = memory_score(ease_factor=2.8, repetitions=8, interval_days=60)
+    assert score >= 90
+
+
+def test_memory_score_always_in_range():
+    """Score is clamped to 0..100 even for extreme inputs."""
+    assert memory_score(ease_factor=5.0, repetitions=99, interval_days=999) == 100
+    assert 0 <= memory_score(ease_factor=1.3, repetitions=0, interval_days=0) <= 100
+
+
+def test_learning_status_transitions():
+    """Status maps SM-2 state to the learning_status enum values."""
+    assert learning_status(repetitions=0, interval_days=1) == "learning"  # lapsed/new
+    assert learning_status(repetitions=1, interval_days=1) == "learning"
+    assert learning_status(repetitions=3, interval_days=15) == "review"
+    assert learning_status(repetitions=5, interval_days=30) == "mastered"

@@ -68,3 +68,52 @@ def review(
         repetitions=new_repetitions,
         next_review_at=now + timedelta(days=new_interval),
     )
+
+
+# Weights within the "retention" term (interval vs. repetition streak). Tunable.
+_SCORE_INTERVAL_WEIGHT = 0.6
+_SCORE_REP_WEIGHT = 0.4
+
+# A technique due ~3 weeks out is treated as "mastered".
+_MASTERED_INTERVAL_DAYS = 21
+
+
+def memory_score(ease_factor: float, repetitions: int, interval_days: int) -> int:
+    """Friendly 0-100 confidence number derived from the SM-2 state.
+
+    A first-pass heuristic (tunable): demonstrated *retention* grows with the
+    scheduling interval (capped at ~30 days) and the streak of successful
+    reviews (capped at 5). The ease factor then scales that as a quality
+    multiplier — normalized 0 at the 1.3 floor, 1 at the 2.5 default and above —
+    so a technique the user keeps failing is discounted. A brand-new or
+    just-lapsed technique (no interval, no streak) scores near 0; a
+    long-interval, high-ease one approaches 100.
+    """
+    interval_component = min(1.0, interval_days / 30.0)
+    rep_component = min(1.0, repetitions / 5.0)
+    retention = (
+        _SCORE_INTERVAL_WEIGHT * interval_component
+        + _SCORE_REP_WEIGHT * rep_component
+    )
+
+    ease_span = 2.5 - MIN_EASE_FACTOR
+    ease_multiplier = max(0.0, min(1.0, (ease_factor - MIN_EASE_FACTOR) / ease_span))
+
+    score = 100 * ease_multiplier * retention
+    return max(0, min(100, round(score)))
+
+
+def learning_status(repetitions: int, interval_days: int) -> str:
+    """Map SM-2 state to a `learning_status` enum value (see schema.sql).
+
+    Never returns 'new' — that is the pre-review default; a completed review
+    always advances the technique to at least 'learning'.
+    """
+    if repetitions == 0:
+        # Brand-new first attempt or a fresh lapse: still being learned.
+        return "learning"
+    if interval_days >= _MASTERED_INTERVAL_DAYS:
+        return "mastered"
+    if repetitions >= 3:
+        return "review"
+    return "learning"
