@@ -25,6 +25,11 @@ export default function Home() {
         <Button
           nativeButton={false}
           variant="ghost"
+          render={<Link href="/review">Review</Link>}
+        />
+        <Button
+          nativeButton={false}
+          variant="ghost"
           render={<Link href="/techniques">Browse techniques</Link>}
         />
         <Button

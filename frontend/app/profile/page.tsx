@@ -86,6 +86,13 @@ export default async function ProfilePage() {
           <Button
             nativeButton={false}
             className="w-full"
+            render={<Link href="/review">Start review</Link>}
+          />
+
+          <Button
+            nativeButton={false}
+            variant="outline"
+            className="w-full"
             render={<Link href="/techniques">Browse techniques</Link>}
           />
 
