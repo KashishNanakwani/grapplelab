@@ -2,7 +2,13 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 /** Route prefixes that require an authenticated user. */
-const PROTECTED_PREFIXES = ["/profile", "/techniques", "/review", "/quiz"];
+const PROTECTED_PREFIXES = [
+  "/profile",
+  "/techniques",
+  "/review",
+  "/quiz",
+  "/progress",
+];
 
 /**
  * Refreshes the Supabase auth session on every request and guards protected
