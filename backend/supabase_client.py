@@ -7,17 +7,15 @@ dependency that verifies the bearer token and hands the route a ready-to-use
 client plus the authenticated user id.
 """
 
-import os
 from typing import Tuple
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase import Client, create_client
 
-# Fail fast at import time if the deployment is misconfigured.
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+from config import SUPABASE_ANON_KEY, SUPABASE_URL
 
+# Fail fast at import time if the deployment is misconfigured.
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     raise RuntimeError(
         "SUPABASE_URL and SUPABASE_ANON_KEY environment variables are required."

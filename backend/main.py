@@ -4,7 +4,6 @@ Owns the spaced-repetition scheduler. Exposes a health check and the
 `POST /reviews` endpoint that records a review and advances the SM-2 state.
 """
 
-import os
 from datetime import datetime, timezone
 from typing import Tuple
 from uuid import UUID
@@ -15,18 +14,18 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 from supabase import Client
 
+from config import FRONTEND_ORIGINS
 from spaced_repetition import learning_status, memory_score, review
 from supabase_client import get_current_user
 
 app = FastAPI(title="GrappleLab API", version="0.1.0")
 
-# During local dev the Next.js frontend runs on localhost:3000.
+# During local dev the Next.js frontend runs on localhost:3000 (and the
+# equivalent 127.0.0.1:3000, which browsers treat as a separate origin).
 # Override in production via the FRONTEND_ORIGIN environment variable.
-_frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_frontend_origin],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
