@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+
+import { TimezoneSync } from "./_components/timezone-sync";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,6 +30,9 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        {/* Records the browser's timezone so streak days use the user's
+            midnight, not UTC. Renders nothing; no-ops when signed out. */}
+        <TimezoneSync />
         {children}
       </body>
     </html>

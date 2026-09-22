@@ -37,11 +37,18 @@ create table profiles (
   belt              belt_rank          not null default 'white',
   stripes           smallint           not null default 0 check (stripes between 0 and 4),
   tier              subscription_tier  not null default 'free',
-  current_streak    integer            not null default 0,   -- Duolingo-style daily streak
-  longest_streak    integer            not null default 0,
-  last_active_on    date,
+  -- IANA zone reported by the browser, used to bucket streak days at the
+  -- user's own midnight rather than UTC's. See analytics.sql `user_streak`.
+  timezone          text               not null default 'UTC',
   created_at        timestamptz        not null default now()
 );
+
+-- NOTE: daily streaks are DERIVED, not stored. They are computed on read by
+-- the `user_streak` view in analytics.sql from review_logs + quiz_attempts.
+-- This table deliberately has no current_streak / longest_streak columns: a
+-- denormalized copy would be a second source of truth that drifts, and the
+-- "own profile" RLS policy below is FOR ALL, so a client could simply write
+-- itself an arbitrary streak.
 
 
 -- ---------------------------------------------------------------------

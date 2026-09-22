@@ -16,6 +16,12 @@
 -- The curriculum tables (positions, techniques) are readable by all
 -- authenticated users, so "total" counts reflect the full library.
 --
+-- CAVEAT that follows from the above: an RLS-EXEMPT caller (the service_role
+-- key, or `postgres` in the SQL editor) is not filtered by auth.uid(), so it
+-- silently gets a GLOBAL aggregate across all users rather than an error.
+-- These views are only meaningful when queried as an end user. A leaderboard
+-- or batch job needs a different, user_id-grouped artifact.
+--
 -- memory_score and status are read exactly as stored — never recomputed.
 -- Idempotent: create or replace view. No changes to existing tables.
 -- =====================================================================
@@ -61,24 +67,55 @@ order by belt;
 
 
 -- ---------------------------------------------------------------------
+-- TIMEZONE, shared by the two day-bucketing views below.
+--
+-- reviewed_at / answered_at are timestamptz. Casting one straight to ::date
+-- renders it in the SESSION timezone, which for PostgREST is UTC — so the
+-- "day" would roll over at 17:00 PT, i.e. in the middle of evening training.
+-- That both splits genuine streaks and lets one session count as two days.
+-- Instead we bucket with `at time zone profiles.timezone`, the zone the
+-- browser reported (see frontend/app/_components/timezone-sync.tsx).
+--
+-- RLS limits `profiles` to the caller's own row, so the scalar subquery
+-- yields that user's zone. The pg_timezone_names guard makes an unknown or
+-- malformed zone fall back to UTC instead of raising, which would otherwise
+-- take down the whole dashboard for that user.
+--
+-- Note this is retroactive: changing the stored timezone re-buckets all
+-- history, so a past streak can lengthen or split.
+-- ---------------------------------------------------------------------
+
+
+-- ---------------------------------------------------------------------
 -- 3. user_daily_activity — one row per day (within the last 90 days) that
 --    had any review or quiz activity, for growth/retention trend charts.
+--    Must bucket days identically to user_streak, or the activity chart and
+--    the streak cards would disagree about which day a session fell on.
 -- ---------------------------------------------------------------------
 create or replace view user_daily_activity
 with (security_invoker = true) as
-with reviews as (
-  select reviewed_at::date as day, count(*) as review_count
-  from review_logs
-  where reviewed_at >= current_date - interval '90 days'
+with settings as (
+  select coalesce(
+    (select p.timezone from profiles p
+      where exists (select 1 from pg_timezone_names n where n.name = p.timezone)
+      limit 1),
+    'UTC') as zone
+),
+reviews as (
+  select
+    (r.reviewed_at at time zone s.zone)::date  as day,
+    count(*)                                   as review_count
+  from review_logs r cross join settings s
+  where r.reviewed_at >= now() - interval '90 days'
   group by 1
 ),
 quizzes as (
   select
-    answered_at::date as day,
-    count(*)                          as quiz_count,
-    count(*) filter (where is_correct) as quiz_correct
-  from quiz_attempts
-  where answered_at >= current_date - interval '90 days'
+    (q.answered_at at time zone s.zone)::date  as day,
+    count(*)                                   as quiz_count,
+    count(*) filter (where q.is_correct)       as quiz_correct
+  from quiz_attempts q cross join settings s
+  where q.answered_at >= now() - interval '90 days'
   group by 1
 )
 select
@@ -99,14 +136,28 @@ order by activity_date;
 -- 4. user_streak — a single row with the current and longest daily streaks,
 --    over the distinct calendar days that had any activity (reviews OR
 --    quizzes). Classic gaps-and-islands with window functions.
+--
+--    Days are bucketed in the user's own timezone — see the TIMEZONE note
+--    above. Streaks are computed here and NEVER stored on profiles, so this
+--    view is the single source of truth: /profile and /progress read the
+--    same numbers and cannot drift.
 -- ---------------------------------------------------------------------
 create or replace view user_streak
 with (security_invoker = true) as
-with activity_days as (
+with settings as (
+  select coalesce(
+    (select p.timezone from profiles p
+      where exists (select 1 from pg_timezone_names n where n.name = p.timezone)
+      limit 1),
+    'UTC') as zone
+),
+activity_days as (
   -- UNION dedupes to one row per distinct active day.
-  select reviewed_at::date as day from review_logs
+  select (r.reviewed_at at time zone s.zone)::date as day
+    from review_logs r cross join settings s
   union
-  select answered_at::date as day from quiz_attempts
+  select (q.answered_at at time zone s.zone)::date as day
+    from quiz_attempts q cross join settings s
 ),
 islands as (
   -- Consecutive days share the same `grp`: (day - its row number) is constant
@@ -118,9 +169,20 @@ runs as (
   select count(*)::int as len, max(day) as end_day
   from islands
   group by grp
+),
+today as (
+  -- The user's local today, not UTC's. Exactly one row, since `settings`
+  -- is an ungrouped scalar select.
+  select (now() at time zone s.zone)::date as d from settings s
 )
+-- LEFT JOIN (not CROSS JOIN) so a user with no activity at all still yields
+-- one row of zeros rather than an empty result — the frontend reads this
+-- with .maybeSingle() and expects a row.
 select
   -- The run ending today or yesterday is the current streak (0 if none).
-  coalesce(max(len) filter (where end_day >= current_date - 1), 0) as current_streak,
-  coalesce(max(len), 0)                                            as longest_streak
-from runs;
+  -- The one-day grace is deliberate: a streak that ended yesterday still
+  -- reads as current until today is over, matching Duolingo-style streaks.
+  coalesce(max(r.len) filter (where r.end_day >= t.d - 1), 0)      as current_streak,
+  coalesce(max(r.len), 0)                                          as longest_streak
+from today t
+left join runs r on true;

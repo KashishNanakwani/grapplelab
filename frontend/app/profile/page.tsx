@@ -20,11 +20,20 @@ type Profile = {
   belt: "white" | "blue" | "purple" | "brown" | "black";
   stripes: number;
   tier: "free" | "pro" | "academy";
-  current_streak: number;
-  longest_streak: number;
-  last_active_on: string | null;
+  timezone: string;
   created_at: string;
 };
+
+/**
+ * The single row from the `user_streak` view (see analytics.sql). Streaks are
+ * derived from review + quiz activity, never stored on `profiles`, so this
+ * page and /progress cannot disagree.
+ */
+type Streak = { current_streak: number; longest_streak: number };
+
+function days(n: number) {
+  return `${n} day${n === 1 ? "" : "s"}`;
+}
 
 function Field({ label, value }: { label: string; value: string | number }) {
   return (
@@ -46,11 +55,11 @@ export default async function ProfilePage() {
     redirect("/login");
   }
 
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single<Profile>();
+  const [{ data: profile, error }, { data: streak }] = await Promise.all([
+    supabase.from("profiles").select("*").eq("id", user.id).single<Profile>(),
+    // RLS scopes the view to this user; it always returns exactly one row.
+    supabase.from("user_streak").select("*").maybeSingle<Streak>(),
+  ]);
 
   return (
     <main className="flex flex-1 items-center justify-center p-6">
@@ -74,8 +83,14 @@ export default async function ProfilePage() {
                 value={`${profile.belt}${profile.stripes ? ` · ${profile.stripes} stripe${profile.stripes > 1 ? "s" : ""}` : ""}`}
               />
               <Field label="Tier" value={profile.tier} />
-              <Field label="Current streak" value={`${profile.current_streak} days`} />
-              <Field label="Longest streak" value={`${profile.longest_streak} days`} />
+              <Field
+                label="Current streak"
+                value={streak ? days(streak.current_streak) : "—"}
+              />
+              <Field
+                label="Longest streak"
+                value={streak ? days(streak.longest_streak) : "—"}
+              />
               <Field
                 label="Member since"
                 value={new Date(profile.created_at).toLocaleDateString()}
