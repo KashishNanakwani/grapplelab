@@ -242,16 +242,11 @@ export function ReviewSession() {
       </p>
 
       <Card className="w-full">
+        {/* The technique name is the whole prompt. Position and kind used to
+            sit here as badges, which spoiled two of the three facts the answer
+            panel below reveals. */}
         <CardHeader>
           <CardTitle className="text-2xl">{card.name}</CardTitle>
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            {card.positionName ? (
-              <Badge variant="secondary">{card.positionName}</Badge>
-            ) : null}
-            <Badge variant="outline" className="capitalize">
-              {card.kind}
-            </Badge>
-          </div>
         </CardHeader>
 
         <CardContent className="space-y-4">
@@ -261,18 +256,22 @@ export function ReviewSession() {
             </Button>
           ) : (
             <>
-              <div className="space-y-2 rounded-md bg-muted/50 px-3 py-3 text-sm">
-                <div className="flex items-center justify-between">
+              {/* Unfilled, bordered, divider rows — the same idiom as the
+                  Field rows on /profile. A neutral fill here would be the
+                  CardFooter treatment, and `bg-muted` elsewhere in the app
+                  means "status strip", not "content". */}
+              <div className="rounded-lg border p-3 text-sm">
+                <div className="flex items-center justify-between border-b py-2 last:border-b-0">
                   <span className="text-muted-foreground">Position</span>
                   <span className="font-medium">
                     {card.positionName ?? "—"}
                   </span>
                 </div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between border-b py-2 last:border-b-0">
                   <span className="text-muted-foreground">Kind</span>
                   <span className="font-medium capitalize">{card.kind}</span>
                 </div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between border-b py-2 last:border-b-0">
                   <span className="text-muted-foreground">Belt level</span>
                   <Badge
                     variant="outline"
