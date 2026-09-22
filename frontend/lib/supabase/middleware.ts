@@ -8,6 +8,7 @@ const PROTECTED_PREFIXES = [
   "/review",
   "/quiz",
   "/progress",
+  "/coach",
 ];
 
 /**
