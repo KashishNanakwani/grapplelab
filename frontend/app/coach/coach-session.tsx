@@ -32,6 +32,9 @@ export function CoachSession() {
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Tracks a 403 specifically, so the paywall message can offer a way out.
+  // Kept beside submitError rather than storing JSX in state.
+  const [gated, setGated] = useState(false);
 
   async function ask(text: string) {
     const trimmed = text.trim();
@@ -39,6 +42,7 @@ export function CoachSession() {
 
     setSubmitting(true);
     setSubmitError(null);
+    setGated(false);
     setAnswer(null);
     try {
       const {
@@ -63,6 +67,7 @@ export function CoachSession() {
         // than collapsing everything into one message.
         if (res.status === 403) {
           setSubmitError("The AI coach is a Pro feature. Upgrade to unlock it.");
+          setGated(true);
         } else if (res.status === 429) {
           setSubmitError("The coach is rate limited right now. Try again shortly.");
         } else if (res.status === 503) {
@@ -128,9 +133,21 @@ export function CoachSession() {
           </Button>
 
           {submitError ? (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {submitError}
-            </p>
+            <div className="space-y-2">
+              <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {submitError}
+              </p>
+              {gated ? (
+                <p className="text-sm">
+                  <Link
+                    href="/pricing"
+                    className="font-medium text-foreground underline"
+                  >
+                    See plans
+                  </Link>
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </CardContent>
       </Card>

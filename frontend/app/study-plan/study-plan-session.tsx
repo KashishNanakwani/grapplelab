@@ -31,12 +31,16 @@ export function StudyPlanSession() {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Tracks a 403 specifically, so the paywall message can offer a way out.
+  // Kept beside submitError rather than storing JSX in state.
+  const [gated, setGated] = useState(false);
 
   async function generate(horizon: number) {
     if (submitting) return;
 
     setSubmitting(true);
     setSubmitError(null);
+    setGated(false);
     setPlan(null);
     try {
       const {
@@ -61,6 +65,7 @@ export function StudyPlanSession() {
         // than collapsing everything into one message.
         if (res.status === 403) {
           setSubmitError("Study plans are a Pro feature. Upgrade to unlock them.");
+          setGated(true);
         } else if (res.status === 429) {
           setSubmitError("The AI service is rate limited. Try again shortly.");
         } else if (res.status === 503) {
@@ -119,9 +124,21 @@ export function StudyPlanSession() {
           </Button>
 
           {submitError ? (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {submitError}
-            </p>
+            <div className="space-y-2">
+              <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {submitError}
+              </p>
+              {gated ? (
+                <p className="text-sm">
+                  <Link
+                    href="/pricing"
+                    className="font-medium text-foreground underline"
+                  >
+                    See plans
+                  </Link>
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </CardContent>
       </Card>
