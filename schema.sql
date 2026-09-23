@@ -237,8 +237,17 @@ create policy "own quiz_attempts"    on quiz_attempts
 
 -- =====================================================================
 -- 11. Example analytics view (the dashboard reads from views like this)
+--
+-- SECURITY: `security_invoker = true` is load-bearing, not decoration. A
+-- Postgres view defaults to running as its OWNER, which bypasses the RLS on
+-- user_techniques — so without this the view returns EVERY user's row to
+-- anyone holding the publishable anon key, which ships in the frontend
+-- bundle. Verified: before this flag, an unauthenticated request with only
+-- the anon key returned a real user_id and their progress counts. With it,
+-- the same request returns nothing. Every view in analytics.sql sets it too.
 -- =====================================================================
-create or replace view user_dashboard_summary as
+create or replace view user_dashboard_summary
+with (security_invoker = true) as
 select
   ut.user_id,
   count(*)                                              as techniques_started,
