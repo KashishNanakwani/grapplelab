@@ -1,13 +1,13 @@
 """GrappleLab backend — FastAPI app.
 
-Owns the spaced-repetition scheduler. Exposes a health check, the
-`POST /reviews` endpoint that records a review and advances the SM-2 state,
-and `POST /coach`, the AI study coach.
+Owns the spaced-repetition scheduler and the AI features. Routes:
+`GET /health`, `POST /reviews` (records a review, advances SM-2),
+`POST /coach` (AI study coach), `POST /study-plan` (AI training plan).
 """
 
 import logging
 from datetime import datetime, timezone
-from typing import Tuple
+from typing import Optional, Tuple
 from uuid import UUID
 
 import httpx
@@ -17,14 +17,20 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 from supabase import Client
 
-from coach import GeminiError, ask_gemini, build_context
+from coach import build_context, build_system_instruction
 from config import (
     ALLOW_FREE_TIER_COACH,
     FRONTEND_ORIGINS,
     GEMINI_API_KEY,
     GEMINI_MODEL,
 )
+from gemini import GeminiError, ask_gemini
 from spaced_repetition import learning_status, memory_score, review
+from study_plan import (
+    build_plan_context,
+    build_plan_prompt,
+    build_plan_system_instruction,
+)
 from supabase_client import get_current_user
 
 # uvicorn's logging config attaches handlers to the `uvicorn*` loggers only —
@@ -45,7 +51,7 @@ app = FastAPI(title="GrappleLab API", version="0.1.0")
 # you can tell from the terminal whether a restart actually picked up the env
 # file. Boolean only — the key itself is never logged.
 logger.info(
-    "startup: coach model=%s, GEMINI_API_KEY set=%s",
+    "startup: AI model=%s, GEMINI_API_KEY set=%s",
     GEMINI_MODEL,
     bool(GEMINI_API_KEY),
 )
@@ -176,6 +182,86 @@ def create_review(
     )
 
 
+# --- Shared AI-feature plumbing --------------------------------------------
+
+# Tiers that include the AI features (see the freemium tiers in CLAUDE.md).
+_AI_TIERS = ("pro", "academy")
+
+# Weakest-first, so a user with a large library still gets their problem areas.
+_CONTEXT_LIMIT = 20
+
+# The technique columns both AI features need.
+_TECHNIQUE_SELECT = (
+    "memory_score, status, repetitions, ease_factor, "
+    "techniques(name, kind, belt_level, positions(name))"
+)
+
+
+def _require_ai_access(supabase: Client, user_id: str) -> None:
+    """Raise unless the AI features are configured and the caller may use them.
+
+    Shared by /coach and /study-plan so the gate cannot drift between them.
+    """
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY is not set; refusing to call Gemini")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The AI features are not configured on this server.",
+        )
+
+    profile = (
+        supabase.table("profiles").select("tier").eq("id", user_id).limit(1).execute()
+    )
+    tier = (profile.data[0].get("tier") if profile.data else None) or "free"
+
+    if tier not in _AI_TIERS and not ALLOW_FREE_TIER_COACH:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This is a Pro feature. Upgrade to unlock it.",
+        )
+
+
+def _weakest_techniques(supabase: Client, user_id: str) -> list[dict]:
+    """The caller's weakest techniques, RLS-scoped, weakest first."""
+    rows = (
+        supabase.table("user_techniques")
+        .select(_TECHNIQUE_SELECT)
+        .eq("user_id", user_id)
+        .order("memory_score")
+        .limit(_CONTEXT_LIMIT)
+        .execute()
+    )
+    return rows.data or []
+
+
+def _gemini_http_exception(exc: GeminiError) -> HTTPException:
+    """Map a GeminiError onto the response the client should see.
+
+    `gemini.py` has already logged the traceback and Gemini's own error body;
+    callers log again so no branch can be the silent one.
+    """
+    if exc.status == status.HTTP_429_TOO_MANY_REQUESTS:
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="The AI service is rate limited right now. Try again shortly.",
+        )
+    if exc.status is not None:
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"The AI service rejected the request (Gemini {exc.status}). "
+                "See the server log for details."
+            ),
+        )
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"The AI service could not answer: {exc.detail}",
+    )
+
+
+# --- /coach ----------------------------------------------------------------
+
+
 class CoachRequest(BaseModel):
     """A question for the AI study coach."""
 
@@ -193,13 +279,6 @@ class CoachResponse(BaseModel):
     )
 
 
-# Tiers that include the AI coach (see the freemium tiers in CLAUDE.md).
-_COACH_TIERS = ("pro", "academy")
-
-# Weakest-first, so a user with a large library still gets their problem areas.
-_COACH_CONTEXT_LIMIT = 20
-
-
 @app.post("/coach", response_model=CoachResponse)
 def ask_coach(
     body: CoachRequest,
@@ -207,54 +286,19 @@ def ask_coach(
 ) -> CoachResponse:
     """Answer a study question using the caller's own progress as context.
 
-    Reads the caller's weakest techniques through the RLS-scoped client, turns
-    them into a plain-text briefing, and asks Gemini. The coach is limited to
-    study strategy and refuses technique instruction — see `coach.py`.
-
     Every failure path logs before it raises. A 502 from this endpoint should
     always have a corresponding traceback in the server log.
     """
     supabase, user_id = ctx
 
-    if not GEMINI_API_KEY:
-        logger.error("coach: GEMINI_API_KEY is not set; refusing to call Gemini")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The AI coach is not configured on this server.",
-        )
-
     try:
-        profile = (
-            supabase.table("profiles")
-            .select("tier")
-            .eq("id", user_id)
-            .limit(1)
-            .execute()
-        )
-        tier = (profile.data[0].get("tier") if profile.data else None) or "free"
-
-        if tier not in _COACH_TIERS and not ALLOW_FREE_TIER_COACH:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="The AI coach is a Pro feature. Upgrade to unlock it.",
-            )
-
-        rows = (
-            supabase.table("user_techniques")
-            .select(
-                "memory_score, status, repetitions, ease_factor, "
-                "techniques(name, kind, belt_level, positions(name))"
-            )
-            .eq("user_id", user_id)
-            .order("memory_score")
-            .limit(_COACH_CONTEXT_LIMIT)
-            .execute()
-        )
+        _require_ai_access(supabase, user_id)
+        context_rows = _weakest_techniques(supabase, user_id)
     except APIError as exc:
         logger.error("coach: Supabase rejected the context query: %s", exc.message)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
     except HTTPException:
-        # Our own 403 — a deliberate response, not a failure to report.
+        # Our own 403/503 — deliberate responses, not failures to report.
         raise
     except Exception as exc:
         logger.exception(
@@ -262,57 +306,137 @@ def ask_coach(
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"The AI coach failed before calling Gemini ({type(exc).__name__}).",
+            detail=f"The coach failed before calling Gemini ({type(exc).__name__}).",
         )
 
-    context_rows = rows.data or []
     context = build_context(context_rows)
     logger.info("coach: built context from %s technique rows", len(context_rows))
 
     try:
-        answer = ask_gemini(body.question, context)
-    except GeminiError as exc:
-        # `coach.py` has already logged the traceback and Gemini's own error
-        # body. Log again here anyway: a branch that returns 502 without
-        # logging is exactly the bug this endpoint just had, and this line
-        # holds whatever raised the GeminiError, not just coach.py.
-        logger.error("coach: GeminiError (status=%s): %s", exc.status, exc.detail)
-
-        # Name the status so the browser message points at the log.
-        if exc.status == status.HTTP_429_TOO_MANY_REQUESTS:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="The AI coach is rate limited right now. Try again shortly.",
-            )
-        if exc.status is not None:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    f"The AI coach rejected the request (Gemini {exc.status}). "
-                    "See the server log for details."
-                ),
-            )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"The AI coach could not answer: {exc.detail}",
+        answer = ask_gemini(
+            f"{context}\n\nThe user asks: {body.question}",
+            build_system_instruction(),
         )
+    except GeminiError as exc:
+        logger.error("coach: GeminiError (status=%s): %s", exc.status, exc.detail)
+        raise _gemini_http_exception(exc)
     except httpx.HTTPError as exc:
-        # Safety net: coach.py converts these to GeminiError, so reaching here
-        # means something changed. Log it rather than returning a bare 502.
         logger.exception(
             "coach: uncaught httpx error reaching Gemini (%s)", type(exc).__name__
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"The AI coach is unreachable ({type(exc).__name__}).",
+            detail=f"The AI service is unreachable ({type(exc).__name__}).",
         )
     except Exception as exc:
-        # Nothing may leave this handler unlogged.
         logger.exception("coach: unexpected failure (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"The AI coach failed unexpectedly ({type(exc).__name__}).",
+            detail=f"The coach failed unexpectedly ({type(exc).__name__}).",
         )
 
     logger.info("coach: answered (%s chars)", len(answer))
     return CoachResponse(answer=answer, context_used=len(context_rows))
+
+
+# --- /study-plan -----------------------------------------------------------
+
+
+class StudyPlanRequest(BaseModel):
+    """A request for a training plan covering the next `days` days."""
+
+    days: int = Field(
+        default=7, ge=1, le=28, description="How many days the plan should cover."
+    )
+
+
+class StudyPlanResponse(BaseModel):
+    """The generated plan, plus how much of the user's data informed it."""
+
+    plan: str
+    context_used: int = Field(
+        description="How many of the user's technique rows were sent as context."
+    )
+    days: int
+
+
+# A plan is longer than a coach answer, so it gets more room.
+_PLAN_MAX_OUTPUT_TOKENS = 1200
+
+
+@app.post("/study-plan", response_model=StudyPlanResponse)
+def create_study_plan(
+    body: StudyPlanRequest,
+    ctx: Tuple[Client, str] = Depends(get_current_user),
+) -> StudyPlanResponse:
+    """Generate a personalised training plan from the caller's own data.
+
+    Uses the same auth, tier gate, transport and error taxonomy as /coach.
+    Context adds position mastery and streak, which a weekly plan needs and a
+    single question does not. Reads only `security_invoker` views, never
+    `user_dashboard_summary`.
+    """
+    supabase, user_id = ctx
+
+    try:
+        _require_ai_access(supabase, user_id)
+        technique_rows = _weakest_techniques(supabase, user_id)
+
+        # Both are security_invoker views, so RLS scopes them to the caller.
+        positions = supabase.table("user_position_mastery").select("*").execute()
+        position_rows = positions.data or []
+
+        streak_result = supabase.table("user_streak").select("*").limit(1).execute()
+        streak: Optional[dict] = (
+            streak_result.data[0] if streak_result.data else None
+        )
+    except APIError as exc:
+        logger.error("study-plan: Supabase rejected a context query: %s", exc.message)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "study-plan: unexpected failure building context (%s)", type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"The planner failed before calling Gemini ({type(exc).__name__}).",
+        )
+
+    context = build_plan_context(technique_rows, position_rows, streak)
+    logger.info(
+        "study-plan: context from %s techniques, %s positions, streak=%s",
+        len(technique_rows),
+        len(position_rows),
+        bool(streak),
+    )
+
+    try:
+        plan = ask_gemini(
+            f"{context}\n\n{build_plan_prompt(body.days)}",
+            build_plan_system_instruction(),
+            max_output_tokens=_PLAN_MAX_OUTPUT_TOKENS,
+        )
+    except GeminiError as exc:
+        logger.error("study-plan: GeminiError (status=%s): %s", exc.status, exc.detail)
+        raise _gemini_http_exception(exc)
+    except httpx.HTTPError as exc:
+        logger.exception(
+            "study-plan: uncaught httpx error reaching Gemini (%s)", type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"The AI service is unreachable ({type(exc).__name__}).",
+        )
+    except Exception as exc:
+        logger.exception("study-plan: unexpected failure (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"The planner failed unexpectedly ({type(exc).__name__}).",
+        )
+
+    logger.info("study-plan: generated (%s chars)", len(plan))
+    return StudyPlanResponse(
+        plan=plan, context_used=len(technique_rows), days=body.days
+    )

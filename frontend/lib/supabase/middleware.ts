@@ -9,6 +9,7 @@ const PROTECTED_PREFIXES = [
   "/quiz",
   "/progress",
   "/coach",
+  "/study-plan",
 ];
 
 /**

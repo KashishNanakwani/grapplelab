@@ -1,61 +1,34 @@
-"""AI coach — prompt construction and the Google Gemini call.
+"""AI coach — the coach's prompt logic.
 
-Split so the interesting logic is pure and testable: `build_context`,
-`build_system_instruction` and `parse_answer` take data and return strings,
-and `ask_gemini` is the only function that touches the network.
+The Gemini transport, error type and response parsing live in `gemini.py`
+and are shared with the study-plan generator. This module only decides what
+to say to the model.
 
 Scope is deliberately narrow. CLAUDE.md's hard rule is "build the learning
 system, not the lessons — do not fabricate technique instructions", so the
 coach advises on *study strategy* and refuses to explain grappling mechanics.
+`build_system_instruction` is the single definition of that rule; the study
+plan builds on top of it rather than restating it.
 
-API surface: `models/*:generateContent`. Google's docs recommend the newer
-Interactions API, but `ListModels` for this project advertises only
-`generateContent` / `countTokens` / `createCachedContent` /
-`batchGenerateContent` per model, so generateContent is what the key can
-actually reach.
-
-Every failure path here logs a full traceback before raising, so nothing that
-reaches the caller is a mystery in the server log.
+`GeminiError` and `parse_answer` are re-exported so existing importers keep
+working after the transport moved.
 """
 
-import logging
 from typing import Any, Optional
 
-import httpx
+from gemini import GeminiError, ask_gemini, parse_answer
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
-
-logger = logging.getLogger("grapplelab.coach")
-
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-
-_REQUEST_TIMEOUT_SECONDS = 30.0
-
-# Caps runaway answers and free-tier token burn. Truncation is detected via
-# finishReason rather than returned silently.
-_MAX_OUTPUT_TOKENS = 800
+__all__ = [
+    "GeminiError",
+    "ask_gemini",
+    "parse_answer",
+    "build_context",
+    "build_system_instruction",
+]
 
 # memory_score is 0-100 (see spaced_repetition.memory_score).
 _WEAK_SCORE_MAX = 50
 _STRONG_SCORE_MIN = 75
-
-# Bound on how much of Gemini's error body we log, so a huge payload cannot
-# flood the terminal.
-_ERROR_BODY_CHARS = 500
-
-
-class GeminiError(Exception):
-    """A call to Gemini failed, carrying enough detail to actually debug it.
-
-    `status` is the upstream HTTP status when there was one, else None, which
-    covers connection failures, safety blocks and malformed payloads — none of
-    which arrive as an HTTP error status.
-    """
-
-    def __init__(self, message: str, status: Optional[int] = None):
-        super().__init__(message)
-        self.status = status
-        self.detail = message
 
 
 def _first(value: Any) -> Optional[dict]:
@@ -143,7 +116,11 @@ def build_context(rows: list[dict]) -> str:
 
 
 def build_system_instruction() -> str:
-    """The coach's standing instructions. Pure so it can be asserted on."""
+    """The coach's standing instructions. Pure so it can be asserted on.
+
+    Also the single source of the "no technique instruction" rule — the study
+    plan generator extends this string rather than restating the constraint.
+    """
     return (
         "You are the GrappleLab study coach. GrappleLab is a spaced-repetition "
         "app for Brazilian Jiu-Jitsu; you help users manage their REVIEW "
@@ -161,135 +138,3 @@ def build_system_instruction() -> str:
         "Be concise and direct: a few short paragraphs or a short list. "
         "Reference the user's actual numbers when they are relevant."
     )
-
-
-def parse_answer(payload: dict) -> str:
-    """Pull the answer text out of a generateContent response.
-
-    Pure, so the response shapes that used to fail silently are testable.
-    generateContent can return HTTP 200 with no usable text at all — a safety
-    block on the prompt, or a candidate that stopped before emitting parts —
-    so each of those raises rather than collapsing into a blank answer.
-    """
-    block_reason = (payload.get("promptFeedback") or {}).get("blockReason")
-    if block_reason:
-        raise GeminiError(f"Gemini blocked the prompt ({block_reason}).")
-
-    candidates = payload.get("candidates") or []
-    if not candidates:
-        raise GeminiError("Gemini returned no candidates.")
-
-    candidate = candidates[0]
-    parts = (candidate.get("content") or {}).get("parts") or []
-    text = "".join(part.get("text", "") for part in parts).strip()
-
-    if not text:
-        finish_reason = candidate.get("finishReason") or "unknown"
-        raise GeminiError(f"Gemini returned no text (finishReason {finish_reason}).")
-
-    return text
-
-
-def _build_request_body(question: str, context: str) -> dict:
-    """The generateContent request body. Separated to keep `ask_gemini` short."""
-    return {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": f"{context}\n\nThe user asks: {question}"}],
-            }
-        ],
-        "systemInstruction": {"parts": [{"text": build_system_instruction()}]},
-        "generationConfig": {
-            "temperature": 0.4,
-            "maxOutputTokens": _MAX_OUTPUT_TOKENS,
-        },
-    }
-
-
-def ask_gemini(question: str, context: str) -> str:
-    """Ask Gemini a single question. Raises GeminiError with real detail.
-
-    Never logs the API key or the prompt — the prompt carries the user's
-    training data. Only the model, URL, upstream status and Gemini's own error
-    text are logged.
-    """
-    url = f"{GEMINI_BASE_URL}/{GEMINI_MODEL}:generateContent"
-
-    # Logged before the call so "never attempted" and "attempted and failed"
-    # are distinguishable. Boolean only — never the key itself.
-    logger.info(
-        "coach: POST %s (timeout %ss, api_key_present=%s)",
-        url,
-        _REQUEST_TIMEOUT_SECONDS,
-        bool(GEMINI_API_KEY),
-    )
-
-    try:
-        response = httpx.post(
-            url,
-            headers={
-                "x-goog-api-key": GEMINI_API_KEY or "",
-                "Content-Type": "application/json",
-            },
-            json=_build_request_body(question, context),
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-        )
-    except httpx.HTTPError as exc:
-        # Connection refused, DNS failure, TLS error, timeout — Gemini never
-        # replied. This is the path that previously vanished without a trace.
-        logger.exception(
-            "coach: request failed before any response (%s)", type(exc).__name__
-        )
-        raise GeminiError(
-            f"Could not reach Gemini: {type(exc).__name__}: {exc}"
-        ) from exc
-    except Exception as exc:
-        logger.exception(
-            "coach: unexpected error issuing the request (%s)", type(exc).__name__
-        )
-        raise GeminiError(
-            f"Unexpected error calling Gemini: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    logger.info("coach: Gemini responded %s", response.status_code)
-
-    if response.status_code != httpx.codes.OK:
-        logger.error(
-            "coach: Gemini %s for model %s: %s",
-            response.status_code,
-            GEMINI_MODEL,
-            response.text[:_ERROR_BODY_CHARS],
-        )
-        raise GeminiError(
-            f"Gemini returned {response.status_code}.", status=response.status_code
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        logger.exception(
-            "coach: Gemini 200 but body was not JSON for model %s: %s",
-            GEMINI_MODEL,
-            response.text[:_ERROR_BODY_CHARS],
-        )
-        raise GeminiError("Gemini returned a malformed response.", status=200) from exc
-
-    try:
-        return parse_answer(payload)
-    except GeminiError:
-        # 200 with no usable text: log the whole payload, it is small and it
-        # is the only record of why the answer was empty.
-        logger.error(
-            "coach: Gemini 200 with no usable text for model %s: %s",
-            GEMINI_MODEL,
-            str(payload)[:_ERROR_BODY_CHARS],
-        )
-        raise
-    except Exception as exc:
-        logger.exception(
-            "coach: could not parse Gemini's response (%s)", type(exc).__name__
-        )
-        raise GeminiError(
-            f"Could not parse Gemini's response: {type(exc).__name__}: {exc}"
-        ) from exc
