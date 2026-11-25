@@ -224,11 +224,6 @@ export function ReviewSession() {
               nativeButton={false}
               render={<Link href="/profile">Back to profile</Link>}
             />
-            <Button
-              nativeButton={false}
-              variant="ghost"
-              render={<Link href="/">Home</Link>}
-            />
           </div>
         </CardContent>
       </Card>
