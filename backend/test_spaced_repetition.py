@@ -43,13 +43,31 @@ def test_third_correct_review():
     assert state.next_review_at == NOW + timedelta(days=state.interval_days)
 
 
-def test_failed_review_resets():
-    """A lapse (quality < 3) resets repetitions and reschedules for tomorrow."""
+def test_again_relapses_same_session():
+    """"Again" (quality < 3) resets repetitions and returns within ~1 minute."""
     state = review(ease_factor=2.5, interval_days=15, repetitions=5, quality=1, now=NOW)
 
     assert state.repetitions == 0
-    assert state.interval_days == 1
-    assert state.next_review_at == NOW + timedelta(days=1)
+    assert state.interval_days == 0
+    assert state.next_review_at == NOW + timedelta(minutes=1)
+
+
+def test_hard_while_learning_returns_same_session():
+    """"Hard" on a not-yet-graduated card (reps 0) returns in ~10 minutes."""
+    state = review(ease_factor=2.5, interval_days=0, repetitions=0, quality=3, now=NOW)
+
+    assert state.repetitions == 0
+    assert state.interval_days == 0
+    assert state.next_review_at == NOW + timedelta(minutes=10)
+
+
+def test_hard_after_graduating_grows_slightly():
+    """"Hard" on a graduated card stays in days (interval x 1.2); reps unchanged."""
+    state = review(ease_factor=2.5, interval_days=10, repetitions=3, quality=3, now=NOW)
+
+    assert state.repetitions == 3
+    assert state.interval_days == 12  # round(10 * 1.2)
+    assert state.next_review_at == NOW + timedelta(days=12)
 
 
 def test_ease_factor_floor():

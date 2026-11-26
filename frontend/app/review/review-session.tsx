@@ -181,6 +181,11 @@ export function ReviewSession() {
       }
 
       // The backend owns all SM-2 math; we just move on to the next card.
+      // Again (1) and Hard (3) are scheduled sub-day, so re-queue them to cycle
+      // back this session; Good (4) / Easy (5) are days out and don't return now.
+      if (quality < 4) {
+        setQueue((q) => [...q, card]);
+      }
       setIndex((i) => i + 1);
       setRevealed(false);
     } catch {
